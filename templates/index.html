@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>爬虫数据可视化</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom"></script>
+    <style>
+        .control-panel {
+            margin: 20px 0;
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+        }
+        .panel-row {
+            display: flex;
+            justify-content: space-between;
+            margin: 10px 0;
+        }
+        .form-group {
+            flex: 1;
+            margin: 0 10px;
+        }
+        .info-group {
+            flex: 1;
+            margin: 0 10px;
+            padding: 10px;
+            background: #f5f5f5;
+            border-radius: 3px;
+        }
+        .info-item {
+            margin: 5px 0;
+            color: #666;
+        }
+        .memory-info {
+            color: #28a745;
+        }
+        input[type="number"] {
+            width: 100px;
+            padding: 3px;
+        }
+        #chart {
+            max-height: 500px;  /* 限制最大高度 */
+            margin: 10px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="control-panel">
+        <form id="crawlerForm">
+            <div class="panel-row">
+                <div class="form-group">
+                    <label>布隆过滤器容量:</label>
+                    <input type="number" name="capacity" value="220" min="1" oninput="updateTheoryValues()">
+                </div>
+                <div class="form-group">
+                    <label>错误率:</label>
+                    <input type="number" name="error_rate" value="0.1" min="0.000001" max="1" step="0.000000001" oninput="updateTheoryValues()">
+                </div>
+                <div class="info-group">
+                    <div class="info-item">哈希函数个数: <span id="hashCount">-</span></div>
+                    <div class="info-item">位数组长度: <span id="bitArrayLength">-</span> bits</div>
+                </div>
+                <div class="info-group">
+                    <div class="info-item memory-info">布隆过滤器内存: <span id="bloomMemory">-</span></div>
+                    <div class="info-item memory-info">Set内存: <span id="setMemory">-</span></div>
+                </div>
+            </div>
+            <button type="submit">开始爬取</button>
+        </form>
+    </div>
+    <h2>爬虫去重率与误判率实时图表</h2>
+    <button onclick="resetView()">重置图表</button>
+    <canvas id="chart" width="600" height="600"></canvas>
+
+    <script>
+        const ctx = document.getElementById('chart').getContext('2d');
+        const data = {
+            labels: [],
+            datasets: [
+                {
+                    label: '去重率',
+                    borderColor: 'blue',
+                    data: [],
+                    fill: false,
+                    tension: 0.1
+                },
+                {
+                    label: '误判率',
+                    borderColor: 'red',
+                    data: [],
+                    fill: false,
+                    tension: 0.1
+                }
+            ]
+        };
+        const config = {
+            type: 'line',
+            data: data,
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,  // 允许图表自适应容器
+                scales: {
+                    y: {
+                        min: 0,
+                        max: 1
+                    }
+                },
+                plugins: {
+                    zoom: {
+                        pan: {
+                            enabled: true,
+                            mode: 'x',
+                            modifierKey: null
+                        },
+                        zoom: {
+                            wheel: {
+                                enabled: false
+                            },
+                            pinch: {
+                                enabled: false
+                            },
+                            mode: 'x'
+                        },
+                        limits: {
+                            x: {min: 'original', max: 'original'},
+                            y: {min: 'original', max: 'original'}
+                        }
+                    }
+                }
+            }
+        };
+        const chart = new Chart(ctx, config);
+
+        // 定时从后端拉取数据更新图表
+        let updating = false;
+        async function updateData() {
+            if (!updating) return;
+            const res = await fetch('/stats');
+            const stats = await res.json();
+            
+            if (stats.is_finished) {
+                updating = false;
+                // 显示内存使用信息
+                document.getElementById('bloomMemory').textContent = stats.bloom_filter_memory;
+                document.getElementById('setMemory').textContent = stats.set_memory;
+            }
+
+            // 添加新的数据点
+            if (data.labels.length >= 50) {
+                data.labels.shift();
+                data.datasets[0].data.shift();
+                data.datasets[1].data.shift();
+            }
+            data.labels.push(stats.total_checked);
+            data.datasets[0].data.push(stats.dedup_rate);
+            data.datasets[1].data.push(stats.false_positive_rate);
+
+            chart.update();
+        }
+
+        // 添加表单提交处理
+        document.getElementById('crawlerForm').onsubmit = async function(e) {
+            e.preventDefault();
+            const formData = new FormData(e.target);
+            const params = {
+                capacity: formData.get('capacity'),
+                error_rate: formData.get('error_rate')
+            };
+            
+            try {
+                const response = await fetch('/start_crawler', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(params)
+                });
+                
+                if (response.ok) {
+                    updating = true;
+                    toast('爬虫已启动!');
+                }
+            } catch (error) {
+                alert('启动失败: ' + error);
+            }
+        };
+
+        function resetView() {
+            chart.data.labels = [];
+            chart.data.datasets.forEach((dataset) => {
+                dataset.data = [];
+            });
+            chart.resetZoom();
+            chart.update();
+        }
+
+        setInterval(updateData, 1000);  // 每秒刷新一次
+
+        function updateTheoryValues() {
+            const capacity = document.querySelector('input[name="capacity"]').value;
+            const errorRate = document.querySelector('input[name="error_rate"]').value;
+
+            // 简单的理论值计算，实际情况可能更复杂
+            const hashCount = Math.round(-(Math.log(errorRate) / Math.log(2)));
+            const bitArrayLength = Math.ceil(-(capacity * Math.log(errorRate)) / (Math.log(2) * Math.log(2)));
+
+            document.getElementById('hashCount').innerText = hashCount;
+            document.getElementById('bitArrayLength').innerText = bitArrayLength;
+        }
+
+        function toast(msg, duration = 2000) {
+            const toastDiv = document.createElement('div');
+            toastDiv.textContent = msg;
+            toastDiv.style.position = 'fixed';
+            toastDiv.style.left = '50%';
+            toastDiv.style.top = '20%';
+            toastDiv.style.transform = 'translate(-50%, 0)';
+            toastDiv.style.background = 'rgba(0,0,0,0.7)';
+            toastDiv.style.color = '#fff';
+            toastDiv.style.padding = '12px 24px';
+            toastDiv.style.borderRadius = '6px';
+            toastDiv.style.zIndex = 9999;
+            toastDiv.style.fontSize = '16px';
+            document.body.appendChild(toastDiv);
+            setTimeout(() => {
+                document.body.removeChild(toastDiv);
+            }, duration);
+        }
+
+        // 页面加载时设置默认值
+        document.getElementById('hashCount').innerText = 3;
+        document.getElementById('bitArrayLength').innerText = 1055;
+    </script>
+</body>
+</html>
